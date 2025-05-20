@@ -1,0 +1,104 @@
+{
+  "Comment": "Orchestrates Bedrock KB ingestion for all files in a folder, then summarizes.",
+  "StartAt": "IngestFilesMap",
+  "States": {
+    "IngestFilesMap": {
+      "Type": "Map",
+      "Comment": "Process each S3 item from the input array in parallel using a distributed map.",
+      "InputPath": "$",
+      "ItemsPath": "$.s3ItemsToProcess",
+      "Parameters": {
+        "s3Key.$": "$$.Map.Item.Value.s3Key",
+        "userId.$": "$$.Map.Item.Value.userId",
+        "folderId.$": "$$.Map.Item.Value.folderId",
+        "sessionId.$": "$$.Map.Item.Value.sessionId"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "STANDARD"
+        },
+        "StartAt": "IngestSingleFileToKB",
+        "States": {
+          "IngestSingleFileToKB": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "arn:aws:lambda:us-east-1:510297366615:function:IngestFileToBedrockKBLambda",
+              "Payload.$": "$"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException",
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 15,
+                "MaxAttempts": 2,
+                "BackoffRate": 1.5
+              }
+            ],
+            "ResultPath": null,
+            "End": true
+          }
+        }
+      },
+      "MaxConcurrency": 5,
+      "ResultPath": null,
+      "Next": "SummarizeFolderContent",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "FolderProcessingFailed",
+          "ResultPath": "$.errorInfo"
+        }
+      ]
+    },
+    "SummarizeFolderContent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:510297366615:function:SummarizeFolderLambda",
+        "Payload": {
+          "userId.$": "$.userId",
+          "folderId.$": "$.folderId"
+        }
+      },
+      "ResultPath": "$.summaryResult",
+      "Next": "UpdateFolderStatusSuccess"
+    },
+    "UpdateFolderStatusSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:510297366615:function:UpdateFolderMetadataLambda",
+        "Payload": {
+          "userId.$": "$.userId",
+          "folderId.$": "$.folderId",
+          "status": "folder_summarized",
+          "summaryS3Key.$": "$.summaryResult.Payload.summaryS3Key"
+        }
+      },
+      "End": true
+    },
+    "FolderProcessingFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:510297366615:function:UpdateFolderMetadataLambda",
+        "Payload": {
+          "userId.$": "$.userId",
+          "folderId.$": "$.folderId",
+          "status": "folder_processing_failed",
+          "errorDetails.$": "$.errorInfo"
+        }
+      },
+      "End": true
+    }
+  }
+}

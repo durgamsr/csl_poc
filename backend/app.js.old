@@ -1,0 +1,1100 @@
+const express = require('express');
+const session = require('express-session');
+const { Issuer, generators } = require('openid-client');
+const path = require('path');
+const cors = require('cors');
+const AWS = require('aws-sdk');
+const multer = require('multer');
+const fs = require('fs');
+const axios = require('axios');
+require('dotenv').config();
+
+// Utility function to safely log token information
+const logTokenInfo = (tokenSet) => {
+    try {
+        if (!tokenSet || !tokenSet.claims) {
+            console.log('No valid token to log');
+            return;
+        }
+        
+        const claims = tokenSet.claims();
+        console.log('=== TOKEN CLAIMS ===');
+        console.log(JSON.stringify(claims, null, 2));
+        
+        // Highlight important claims
+        if (claims['cognito:username']) {
+            console.log(`Cognito Username: ${claims['cognito:username']}`);
+        }
+        if (claims.email) {
+            console.log(`Email: ${claims.email}`);
+        }
+        if (claims.exp) {
+            const expiryTime = new Date(claims.exp * 1000);
+            const now = new Date();
+            const timeLeft = (expiryTime - now) / 1000 / 60; // minutes left
+            console.log(`Token expires at: ${expiryTime}, Minutes left: ${timeLeft.toFixed(2)}`);
+        }
+        console.log('=== END TOKEN INFO ===');
+    } catch (error) {
+        console.error('Error logging token info:', error);
+    }
+};
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Configure multer for file uploads
+const upload = multer({ dest: 'uploads/' });
+
+// Configure AWS
+AWS.config.update({
+    region: process.env.AWS_REGION || 'us-east-2',
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+});
+
+// Initialize S3 client
+const s3 = new AWS.S3();
+const BUCKET_NAME = process.env.S3_BUCKET_NAME;
+
+// Function to create a folder for a new user in S3
+async function createUserFolder(username) {
+    try {
+        // Use the actual username without transforming email
+        const folderName = username;
+        
+        // In S3, folders are actually objects with a key ending in '/'
+        const params = {
+            Bucket: BUCKET_NAME,
+            Key: `${folderName}/`,
+            Body: '' // Empty body as it's just a folder
+        };
+        
+        const result = await s3.putObject(params).promise();
+        console.log(`Created folder for user ${folderName} in S3 bucket`);
+        return result;
+    } catch (error) {
+        console.error(`Error creating folder for user ${username}:`, error);
+        throw error;
+    }
+}
+
+// Enable CORS
+app.use(cors({
+    origin: ['http://localhost:3000', 'https://gqh5xaihg0.execute-api.us-east-1.amazonaws.com'], // Accept requests from React app and AWS API Gateway
+    credentials: true, // Allow cookies to be sent
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+
+// Parse JSON request bodies
+app.use(express.json());
+
+// AWS Cognito Configuration
+const COGNITO_CONFIG = {
+    clientId: process.env.COGNITO_CLIENT_ID || '1ub7igbk78d5u1t9eql1lnkcni',
+    clientSecret: process.env.COGNITO_CLIENT_SECRET || 'ro4rac6dlh0sa4l5hm6oedg1aaoifsbpjee7so1r9tft0e7gl2d',
+    userPoolId: process.env.COGNITO_USER_POOL_ID || 'us-east-2_LOnVytTgO',
+    region: process.env.COGNITO_REGION || 'us-east-2',
+    redirectUri: process.env.COGNITO_REDIRECT_URI || 'http://localhost:3001/callback'
+};
+
+let client;
+
+// Initialize OpenID Client
+async function initializeClient() {
+    try {
+        console.log('Initializing OpenID Client...');
+        // Use the AWS recommended format for discovery URL
+        const issuer = await Issuer.discover(`https://cognito-idp.${COGNITO_CONFIG.region}.amazonaws.com/${COGNITO_CONFIG.userPoolId}/.well-known/openid-configuration`);
+        console.log('Issuer discovered successfully');
+        console.log('Issuer metadata:', issuer.metadata);
+        
+        client = new issuer.Client({
+            client_id: COGNITO_CONFIG.clientId,
+            client_secret: COGNITO_CONFIG.clientSecret,
+            redirect_uris: [COGNITO_CONFIG.redirectUri],
+            response_types: ['code']
+        });
+        console.log('Client initialized successfully');
+    } catch (error) {
+        console.error('Error initializing client:', error);
+    }
+}
+
+// Initialize the client
+initializeClient().catch(console.error);
+
+// Configure session middleware
+app.use(session({
+    secret: process.env.SESSION_SECRET || 'your-session-secret-key',
+    resave: true,
+    saveUninitialized: true,
+    cookie: {
+        secure: false,
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    }
+}));
+
+// Set view engine
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+
+// Authentication middleware
+const checkAuth = (req, res, next) => {
+    if (!req.session.userInfo) {
+        req.isAuthenticated = false;
+    } else {
+        req.isAuthenticated = true;
+    }
+    next();
+};
+
+// Home route
+app.get('/', checkAuth, (req, res) => {
+    res.render('home', {
+        isAuthenticated: req.isAuthenticated,
+        userInfo: req.session.userInfo
+    });
+});
+
+// Login route
+app.get('/login', (req, res) => {
+    const nonce = generators.nonce();
+    const state = generators.state();
+
+    req.session.nonce = nonce;
+    req.session.state = state;
+
+    const authUrl = client.authorizationUrl({
+        scope: 'email openid phone',
+        response_type: 'code',
+        state: state,
+        nonce: nonce,
+    });
+    res.redirect(authUrl);
+});
+
+// Callback route
+app.get('/callback', async (req, res) => {
+    try {
+        const params = client.callbackParams(req);
+        
+        // Check if we have the required parameters
+        if (!params.code || !params.state) {
+            console.error('Missing required parameters:', params);
+            return res.redirect('/');
+        }
+
+        // Verify state matches what we stored
+        if (params.state !== req.session.state) {
+            console.error('State mismatch');
+            return res.redirect('/');
+        }
+
+        const tokenSet = await client.callback(
+            COGNITO_CONFIG.redirectUri,
+            params,
+            {
+                nonce: req.session.nonce,
+                state: req.session.state
+            }
+        );
+
+        // Log token information with utility function
+        console.log('Logging token info from callback:');
+        logTokenInfo(tokenSet);
+
+        const userInfo = await client.userinfo(tokenSet.access_token);
+        
+        // Store user info and token set in session
+        req.session.userInfo = userInfo;
+        
+        // Ensure we have a username - get it from cognito:username if available
+        if (tokenSet.claims && tokenSet.claims()['cognito:username']) {
+            req.session.userInfo.username = tokenSet.claims()['cognito:username'];
+            console.log(`Set username from cognito:username: ${req.session.userInfo.username}`);
+        }
+        
+        req.session.tokenSet = tokenSet;
+        req.session.isAuthenticated = true;
+        
+        // Create a folder for the user in S3 if they don't have one
+        // Using Cognito username as unique identifier for the folder name
+        if (req.session.userInfo && req.session.userInfo.username) {
+            try {
+                // Check if user folder already exists
+                const folderExists = await checkUserFolderExists(req.session.userInfo.username);
+                
+                if (!folderExists) {
+                    // Create a folder for the user
+                    await createUserFolder(req.session.userInfo.username);
+                }
+            } catch (error) {
+                console.error('Error handling user folder:', error);
+                // Continue with login even if folder creation fails
+            }
+        }
+        
+        // Redirect to frontend file upload page
+        res.redirect('http://localhost:3000/');
+    } catch (err) {
+        console.error('Callback error:', err);
+        // Clear session on error
+        req.session.destroy();
+        res.redirect('/');
+    }
+});
+
+// Function to check if a user folder already exists
+async function checkUserFolderExists(username) {
+    try {
+        // Use the actual username without transforming email
+        const folderName = username;
+        
+        const params = {
+            Bucket: BUCKET_NAME,
+            Prefix: `${folderName}/`,
+            MaxKeys: 1
+        };
+        
+        const data = await s3.listObjectsV2(params).promise();
+        return data.Contents && data.Contents.length > 0;
+    } catch (error) {
+        console.error(`Error checking if folder exists for user ${username}:`, error);
+        throw error;
+    }
+}
+
+// Check authentication status
+app.get('/check-auth', (req, res) => {
+    if (req.session.isAuthenticated) {
+        // Log token information when authentication is checked
+        if (req.session.tokenSet) {
+            console.log('Logging token info from check-auth:');
+            logTokenInfo(req.session.tokenSet);
+            
+            try {
+                const idTokenPayload = req.session.tokenSet.claims();
+                
+                // Update userInfo with Cognito username if available
+                if (idTokenPayload['cognito:username'] && 
+                    req.session.userInfo && 
+                    (!req.session.userInfo.username || req.session.userInfo.username !== idTokenPayload['cognito:username'])) {
+                    req.session.userInfo.username = idTokenPayload['cognito:username'];
+                    console.log(`Updated username to: ${req.session.userInfo.username}`);
+                }
+            } catch (error) {
+                console.error('Error processing token in check-auth:', error);
+            }
+        }
+        
+        res.json({ 
+            isAuthenticated: true, 
+            user: req.session.userInfo 
+        });
+    } else {
+        res.json({ isAuthenticated: false });
+    }
+});
+
+// Get user's S3 folder information
+app.get('/user-folder', async (req, res) => {
+    if (!req.session.isAuthenticated || !req.session.userInfo || !req.session.userInfo.username) {
+        return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    try {
+        const userUsername = req.session.userInfo.username;
+        const folderName = userUsername;
+        
+        const params = {
+            Bucket: BUCKET_NAME,
+            Prefix: `${folderName}/`,
+            MaxKeys: 100
+        };
+        
+        const data = await s3.listObjectsV2(params).promise();
+        
+        // Return folder information
+        res.json({
+            bucket: BUCKET_NAME,
+            folderPath: `${folderName}/`,
+            files: data.Contents ? data.Contents.map(item => ({
+                key: item.Key,
+                size: item.Size,
+                lastModified: item.LastModified
+            })) : []
+        });
+    } catch (error) {
+        console.error('Error retrieving user folder information:', error);
+        res.status(500).json({ error: 'Failed to retrieve folder information' });
+    }
+});
+
+// Logout route
+app.get('/logout', (req, res) => {
+    // Get the user's ID token if available
+    const idToken = req.session.tokenSet && req.session.tokenSet.id_token;
+    
+    // Destroy the session
+    req.session.destroy();
+    
+    // Using the format with domain prefix
+    const domainPrefix = COGNITO_CONFIG.userPoolId.split('_')[1].toLowerCase(); // "lonvyttgo"
+    const clientId = COGNITO_CONFIG.clientId;
+    const region = COGNITO_CONFIG.region;
+    const redirectUri = encodeURIComponent('http://localhost:3000');
+    
+    // The correct format for hosted UI logout
+
+    const logoutUrl = `https://${region}${domainPrefix}.auth.${region}.amazoncognito.com/logout?client_id=${clientId}&logout_uri=${redirectUri}`;
+    
+    console.log('Redirecting to logout URL:', logoutUrl);
+    res.redirect(logoutUrl);
+});
+
+// Upload file to user's S3 folder
+app.post('/upload', upload.single('file'), async (req, res) => {
+    try {
+        // Check if the user is authenticated via session
+        let userPath;
+        let userUsername;
+        
+        if (req.session.isAuthenticated && req.session.userInfo && req.session.userInfo.username) {
+            // Use authenticated user's username
+            userUsername = req.session.userInfo.username;
+            // Use the username directly without transformation
+            userPath = userUsername;
+        } else if (req.body.folderPath) {
+            // For non-authenticated users or direct API calls, use the provided folder path
+            userPath = req.body.folderPath;
+            // Try to extract username from folderPath
+            const usernameMatch = req.body.folderPath.match(/^([^\/]+)\//);
+            userUsername = usernameMatch ? usernameMatch[1] : 'anonymous';
+        } else {
+            // Default fallback folder
+            userPath = "anonymous/";
+            userUsername = "anonymous";
+        }
+        
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+        
+        const fileContent = fs.readFileSync(req.file.path);
+        
+        // Get file metadata
+        const fileSize = req.file.size;
+        const originalName = req.file.originalname;
+        const mimeType = req.file.mimetype;
+        const fileExtension = originalName.split('.').pop().toLowerCase();
+        
+        // Extract session ID from folderPath if available
+        let sessionId = '';
+        if (req.body.folderPath) {
+            const sessionMatch = req.body.folderPath.match(/session-[^\/]+/);
+            sessionId = sessionMatch ? sessionMatch[0] : '';
+        }
+        
+        // Construct the S3 key based on folder path and file name
+        // This will organize files into user/session folders
+        let s3Key;
+        
+        if (req.body.folderPath) {
+            // Use the folder path from the request (e.g., "user@example.com/session-123/")
+            s3Key = `${req.body.folderPath}${req.file.originalname}`;
+        } else {
+            // Use the authenticated user path
+            s3Key = `${userPath}/${req.file.originalname}`;
+        }
+        
+        // Ensure the key is properly formatted
+        s3Key = s3Key.replace(/\/+/g, '/'); // Replace multiple slashes with a single one
+        
+        // Add metadata to S3 object
+        const params = {
+            Bucket: BUCKET_NAME,
+            Key: s3Key,
+            Body: fileContent,
+            ContentType: mimeType,
+            Metadata: {
+                'original-name': originalName,
+                'upload-timestamp': new Date().toISOString(),
+                'file-size': fileSize.toString(),
+                'file-extension': fileExtension,
+                'uploaded-by': userUsername,
+                'session-id': sessionId
+            }
+        };
+        
+        // Create folder structure first (if it doesn't exist)
+        if (req.body.folderPath) {
+            const folderKey = req.body.folderPath;
+            try {
+                // Check if folder exists
+                const folderParams = {
+                    Bucket: BUCKET_NAME,
+                    Key: folderKey,
+                    Body: '' // Empty body for folder creation
+                };
+                await s3.putObject(folderParams).promise();
+                console.log(`Created folder: ${folderKey}`);
+            } catch (folderError) {
+                console.error('Error creating folder structure:', folderError);
+                // Continue with file upload even if folder creation fails
+            }
+        }
+        
+        const uploadResult = await s3.upload(params).promise();
+        
+        // Clean up the temporary file
+        fs.unlinkSync(req.file.path);
+        
+        res.json({
+            success: true,
+            message: 'File uploaded successfully',
+            fileUrl: uploadResult.Location,
+            key: uploadResult.Key,
+            metadata: params.Metadata,
+            contentType: mimeType,
+            size: fileSize
+        });
+    } catch (error) {
+        console.error('Error uploading file to S3:', error);
+        // Clean up the temporary file if it exists
+        if (req.file && req.file.path) {
+            try {
+                fs.unlinkSync(req.file.path);
+            } catch (unlinkError) {
+                console.error('Error deleting temporary file:', unlinkError);
+            }
+        }
+        res.status(500).json({ error: 'Failed to upload file' });
+    }
+});
+
+// Delete file from user's S3 folder
+app.delete('/delete-file', async (req, res) => {
+    if (!req.session.isAuthenticated || !req.session.userInfo || !req.session.userInfo.username) {
+        return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    const { key } = req.body;
+    if (!key) {
+        return res.status(400).json({ error: 'No file key provided' });
+    }
+    
+    try {
+        const userUsername = req.session.userInfo.username;
+        const folderName = userUsername;
+        
+        // Ensure user can only delete files from their own folder
+        if (!key.startsWith(`${folderName}/`)) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+        
+        const params = {
+            Bucket: BUCKET_NAME,
+            Key: key
+        };
+        
+        await s3.deleteObject(params).promise();
+        
+        res.json({
+            success: true,
+            message: 'File deleted successfully'
+        });
+    } catch (error) {
+        console.error('Error deleting file from S3:', error);
+        res.status(500).json({ error: 'Failed to delete file' });
+    }
+});
+
+// Generate pre-signed URL for direct S3 uploads from the frontend
+app.post('/generate-upload-url', async (req, res) => {
+    if (!req.session.isAuthenticated || !req.session.userInfo || !req.session.userInfo.username) {
+        return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    const { fileName, fileType } = req.body;
+    if (!fileName || !fileType) {
+        return res.status(400).json({ error: 'File name and type are required' });
+    }
+    
+    try {
+        const userUsername = req.session.userInfo.username;
+        const folderName = userUsername;
+        const key = `${folderName}/${fileName}`;
+        
+        const params = {
+            Bucket: BUCKET_NAME,
+            Key: key,
+            ContentType: fileType,
+            Expires: 60 * 5 // URL expires in 5 minutes
+        };
+        
+        const uploadURL = await s3.getSignedUrlPromise('putObject', params);
+        
+        res.json({
+            uploadURL,
+            key
+        });
+    } catch (error) {
+        console.error('Error generating pre-signed URL:', error);
+        res.status(500).json({ error: 'Failed to generate upload URL' });
+    }
+});
+
+// New endpoint to get files as JSON for frontend
+app.get('/files', async (req, res) => {
+    try {
+        // Check if we have a user in the session
+        let userUsername = 'anonymous';
+        
+        if (req.session.isAuthenticated && req.session.userInfo && req.session.userInfo.username) {
+            userUsername = req.session.userInfo.username;
+        }
+        
+        // Create DynamoDB client
+        const dynamodb = new AWS.DynamoDB.DocumentClient();
+        
+        const params = {
+            TableName: process.env.DYNAMODB_TABLE_NAME || 'userFiles',
+            KeyConditionExpression: 'userId = :uid',
+            ExpressionAttributeValues: {
+                ':uid': userUsername
+            }
+        };
+        
+        try {
+            // Try to get files from DynamoDB first
+            const result = await dynamodb.query(params).promise();
+            console.log('DynamoDB query result:', result);
+            
+            return res.json({
+                success: true,
+                Items: result.Items || [],
+                source: 'dynamodb'
+            });
+        } catch (dynamoError) {
+            console.warn('DynamoDB query failed, falling back to S3:', dynamoError);
+            
+            // Fall back to S3 if DynamoDB fails
+            const s3Params = {
+                Bucket: BUCKET_NAME,
+                Prefix: `${userUsername}/`
+            };
+            
+            const s3Result = await s3.listObjectsV2(s3Params).promise();
+            
+            // Transform S3 objects to match desired format
+            const transformedItems = s3Result.Contents ? s3Result.Contents.map(item => {
+                // Extract fileName from the key (remove the prefix)
+                const fileName = item.Key.replace(`${userUsername}/`, '');
+                const sessionId = fileName.includes('/') ? fileName.split('/')[0] : 'default';
+                
+                return {
+                    userId: userUsername,
+                    fileName: fileName,
+                    sessionId: sessionId,
+                    s3Bucket: BUCKET_NAME,
+                    s3Key: item.Key,
+                    uploadTimestamp: item.LastModified.toISOString(),
+                    fileSize: item.Size,
+                    status: 'unprocessed'
+                };
+            }).filter(item => item.fileSize > 0) : []; // Filter out folder objects
+            
+            return res.json({
+                success: true,
+                Items: transformedItems,
+                source: 's3'
+            });
+        }
+    } catch (error) {
+        console.error('Error retrieving files:', error);
+        res.status(500).json({ error: 'Failed to retrieve files' });
+    }
+});
+
+// New endpoint to get or create a session ID for the user
+app.get('/api/session', (req, res) => {
+    try {
+        // Check if user is authenticated
+        const isAuthenticated = req.session.isAuthenticated || false;
+        const userInfo = req.session.userInfo || null;
+        
+        // Generate a unique session ID
+        const now = new Date();
+        const dateStr = now.toISOString().split('T')[0].replace(/-/g, '');
+        const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '');
+        const sessionId = `session-${dateStr}-${timeStr}`;
+        
+        // Get username from authenticated user or generate from email
+        let username = 'anonymous';
+        let userEmail = 'anonymous@user.com';
+        
+        if (isAuthenticated && userInfo) {
+            if (userInfo.username) {
+                username = userInfo.username;
+            } else if (userInfo['cognito:username']) {
+                username = userInfo['cognito:username'];
+            }
+            
+            if (userInfo.email) {
+                userEmail = userInfo.email;
+                // If username isn't available, generate one from email
+                if (!username || username === 'anonymous') {
+                    username = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, '_');
+                }
+            }
+        }
+        
+        // Store session info in user's session
+        req.session.currentUploadSession = {
+            sessionId,
+            created: now.toISOString(),
+            username
+        };
+        
+        res.json({
+            success: true,
+            sessionId,
+            username,
+            userEmail,
+            isAuthenticated
+        });
+    } catch (error) {
+        console.error('Error generating session ID:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to generate session ID',
+            message: error.message 
+        });
+    }
+});
+
+// New endpoint to get file uploads for current session
+app.get('/api/session/files', async (req, res) => {
+    try {
+        // Get current session info from user's session
+        const sessionInfo = req.session.currentUploadSession;
+        if (!sessionInfo) {
+            return res.json({ success: true, files: [] });
+        }
+        
+        const { username, sessionId } = sessionInfo;
+        
+        // Try to get files from API Gateway first
+        try {
+            const apiGatewayEndpoint = 'https://gqh5xaihg0.execute-api.us-east-1.amazonaws.com/myfiles';
+            
+            // Include authentication token if available
+            const headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            };
+            
+            // If we have a token, include it in the request
+            if (req.session.tokenSet && req.session.tokenSet.access_token) {
+                headers['Authorization'] = `Bearer ${req.session.tokenSet.access_token}`;
+            }
+            
+            const apiResponse = await axios.get(apiGatewayEndpoint, {
+                headers: headers
+            });
+            
+            // Process response data
+            let allFiles = [];
+            if (apiResponse.data && Array.isArray(apiResponse.data.Items)) {
+                allFiles = apiResponse.data.Items;
+            } else if (apiResponse.data && apiResponse.data.body) {
+                // Handle API Gateway response format
+                const bodyData = typeof apiResponse.data.body === 'string' 
+                    ? JSON.parse(apiResponse.data.body) 
+                    : apiResponse.data.body;
+                    
+                if (bodyData && Array.isArray(bodyData.Items)) {
+                    allFiles = bodyData.Items;
+                }
+            }
+            
+            // Filter files for the current session
+            const sessionFiles = allFiles.filter(file => {
+                // Look for session ID in the file path or in the sessionId field
+                return (file.sessionId === sessionId) || 
+                       (file.s3Key && file.s3Key.includes(`/${sessionId}/`)) ||
+                       (file.key && file.key.includes(`/${sessionId}/`));
+            });
+            
+            if (sessionFiles.length > 0) {
+                // Transform files to consistent format
+                const files = sessionFiles.map(file => ({
+                    fileName: file.fileName || file.key?.split('/').pop() || 'Unnamed File',
+                    fileSize: file.fileSize || file.size || 0,
+                    uploadedAt: file.uploadTimestamp || file.lastModified || new Date().toISOString(),
+                    s3Key: file.s3Key || file.key || '',
+                    s3Url: file.s3Url || (file.s3Key ? `https://${BUCKET_NAME}.s3.amazonaws.com/${file.s3Key}` : ''),
+                    contentType: file.contentType || '',
+                    sessionId: sessionId
+                }));
+                
+                res.json({
+                    success: true,
+                    files,
+                    sessionInfo
+                });
+                return;
+            }
+        } catch (apiError) {
+            console.error('Error fetching session files from API Gateway:', apiError);
+            // Continue to fallback S3 method
+        }
+        
+        // Fallback: List files in the user's session folder from S3
+        const s3Params = {
+            Bucket: BUCKET_NAME,
+            Prefix: `${username}/${sessionId}/`
+        };
+        
+        const s3Result = await s3.listObjectsV2(s3Params).promise();
+        
+        // Transform S3 objects to the format expected by frontend
+        const files = s3Result.Contents ? s3Result.Contents
+            .filter(item => item.Size > 0) // Filter out folder objects
+            .map(item => {
+                const fileName = item.Key.split('/').pop();
+                return {
+                    fileName,
+                    fileSize: item.Size,
+                    uploadedAt: item.LastModified.toISOString(),
+                    s3Key: item.Key,
+                    s3Url: `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`,
+                    contentType: '', // S3 doesn't return content type in listObjectsV2
+                    sessionId
+                };
+            }) : [];
+        
+        res.json({
+            success: true,
+            files,
+            sessionInfo
+        });
+    } catch (error) {
+        console.error('Error retrieving session files:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to retrieve session files',
+            message: error.message 
+        });
+    }
+});
+
+// New endpoint to get dashboard statistics
+app.get('/api/dashboard/stats', async (req, res) => {
+    try {
+        // Check if user is authenticated
+        const isAuthenticated = req.session.isAuthenticated || false;
+        const userInfo = req.session.userInfo || null;
+        
+        // Get username from authenticated user or session
+        let username = 'anonymous';
+        
+        if (isAuthenticated && userInfo) {
+            if (userInfo.username) {
+                username = userInfo.username;
+            } else if (userInfo['cognito:username']) {
+                username = userInfo['cognito:username'];
+            }
+        } else if (req.session.currentUploadSession && req.session.currentUploadSession.username) {
+            username = req.session.currentUploadSession.username;
+        }
+        
+        // Try to get files from API Gateway first
+        try {
+            const apiGatewayEndpoint = 'https://gqh5xaihg0.execute-api.us-east-1.amazonaws.com/myfiles';
+            
+            // Include authentication token if available
+            const headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            };
+            
+            // If we have a token, include it in the request
+            if (req.session.tokenSet && req.session.tokenSet.access_token) {
+                headers['Authorization'] = `Bearer ${req.session.tokenSet.access_token}`;
+            }
+            
+            const apiResponse = await axios.get(apiGatewayEndpoint, {
+                headers: headers
+            });
+            
+            // Process response data
+            let files = [];
+            if (apiResponse.data && Array.isArray(apiResponse.data.Items)) {
+                files = apiResponse.data.Items;
+            } else if (apiResponse.data && apiResponse.data.body) {
+                // Handle API Gateway response format
+                const bodyData = typeof apiResponse.data.body === 'string' 
+                    ? JSON.parse(apiResponse.data.body) 
+                    : apiResponse.data.body;
+                    
+                if (bodyData && Array.isArray(bodyData.Items)) {
+                    files = bodyData.Items;
+                }
+            }
+            
+            if (files.length > 0) {
+                // Calculate statistics from API files
+                const totalFiles = files.length;
+                
+                // Group files by session
+                const sessions = {};
+                files.forEach(file => {
+                    const sessionId = file.sessionId || 'unknown';
+                    if (!sessions[sessionId]) {
+                        sessions[sessionId] = {
+                            sessionId,
+                            fileCount: 0,
+                            totalSize: 0,
+                            lastModified: null
+                        };
+                    }
+                    
+                    sessions[sessionId].fileCount++;
+                    sessions[sessionId].totalSize += (file.fileSize || file.size || 0);
+                    
+                    // Update last modified date if newer
+                    const fileDate = new Date(file.uploadTimestamp || file.lastModified || Date.now());
+                    if (!sessions[sessionId].lastModified || 
+                        fileDate > new Date(sessions[sessionId].lastModified)) {
+                        sessions[sessionId].lastModified = fileDate.toISOString();
+                    }
+                });
+                
+                // Convert sessions object to array and sort by last modified date
+                const sessionsArray = Object.values(sessions).sort((a, b) => {
+                    return new Date(b.lastModified) - new Date(a.lastModified);
+                });
+                
+                // Get recent activity (last 5 uploads)
+                const recentFiles = files
+                    .sort((a, b) => {
+                        const dateA = new Date(a.uploadTimestamp || a.lastModified || 0);
+                        const dateB = new Date(b.uploadTimestamp || b.lastModified || 0);
+                        return dateB - dateA;
+                    })
+                    .slice(0, 5)
+                    .map(file => ({
+                        fileName: file.fileName || file.key || 'Unnamed File',
+                        sessionId: file.sessionId || 'unknown',
+                        fileSize: file.fileSize || file.size || 0,
+                        lastModified: file.uploadTimestamp || file.lastModified || new Date().toISOString(),
+                        s3Key: file.s3Key || file.key || ''
+                    }));
+                
+                res.json({
+                    success: true,
+                    stats: {
+                        totalFiles,
+                        totalSessions: Object.keys(sessions).length,
+                        recentSessions: sessionsArray.slice(0, 5),
+                        recentFiles
+                    }
+                });
+                return;
+            }
+        } catch (apiError) {
+            console.error('Error fetching from API Gateway for dashboard:', apiError);
+            // Continue to fallback S3 method
+        }
+        
+        // Fallback: Get files from S3 for this user
+        const s3Params = {
+            Bucket: BUCKET_NAME,
+            Prefix: `${username}/`
+        };
+        
+        const s3Result = await s3.listObjectsV2(s3Params).promise();
+        
+        // Calculate statistics
+        const totalFiles = s3Result.Contents ? s3Result.Contents.filter(item => item.Size > 0).length : 0;
+        
+        // Group files by session
+        const sessions = {};
+        if (s3Result.Contents) {
+            s3Result.Contents.forEach(item => {
+                if (item.Size > 0) { // Skip folder objects
+                    const keyParts = item.Key.split('/');
+                    if (keyParts.length >= 2) {
+                        const sessionId = keyParts[1];
+                        if (!sessions[sessionId]) {
+                            sessions[sessionId] = {
+                                sessionId,
+                                fileCount: 0,
+                                totalSize: 0,
+                                lastModified: null
+                            };
+                        }
+                        
+                        sessions[sessionId].fileCount++;
+                        sessions[sessionId].totalSize += item.Size;
+                        
+                        // Update last modified date if newer
+                        if (!sessions[sessionId].lastModified || 
+                            item.LastModified > sessions[sessionId].lastModified) {
+                            sessions[sessionId].lastModified = item.LastModified;
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Convert sessions object to array and sort by last modified date
+        const sessionsArray = Object.values(sessions).sort((a, b) => {
+            return new Date(b.lastModified) - new Date(a.lastModified);
+        });
+        
+        // Get recent activity (last 5 uploads)
+        const recentFiles = s3Result.Contents 
+            ? s3Result.Contents
+                .filter(item => item.Size > 0)
+                .sort((a, b) => new Date(b.LastModified) - new Date(a.LastModified))
+                .slice(0, 5)
+                .map(item => {
+                    const keyParts = item.Key.split('/');
+                    return {
+                        fileName: keyParts[keyParts.length - 1],
+                        sessionId: keyParts.length >= 2 ? keyParts[1] : 'unknown',
+                        fileSize: item.Size,
+                        lastModified: item.LastModified.toISOString(),
+                        s3Key: item.Key
+                    };
+                })
+            : [];
+        
+        res.json({
+            success: true,
+            stats: {
+                totalFiles,
+                totalSessions: Object.keys(sessions).length,
+                recentSessions: sessionsArray.slice(0, 5),
+                recentFiles
+            }
+        });
+    } catch (error) {
+        console.error('Error retrieving dashboard statistics:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to retrieve dashboard statistics',
+            message: error.message 
+        });
+    }
+});
+
+// New endpoint to serve file data for the FileTable component
+app.get('/api/files', async (req, res) => {
+    try {
+        // Use the AWS API Gateway endpoint but make the call from the backend
+        const apiGatewayEndpoint = 'https://gqh5xaihg0.execute-api.us-east-1.amazonaws.com/myfiles';
+        
+        try {
+            // Include authentication token if available
+            const headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            };
+            
+            // If we have a token, include it in the request
+            if (req.session.tokenSet && req.session.tokenSet.access_token) {
+                headers['Authorization'] = `Bearer ${req.session.tokenSet.access_token}`;
+            }
+            
+            const apiResponse = await axios.get(apiGatewayEndpoint, {
+                headers: headers
+            });
+            
+            let responseData = apiResponse.data;
+            
+            // Process the data before sending to frontend
+            if (responseData && Array.isArray(responseData.Items)) {
+                res.json({ success: true, Items: responseData.Items });
+            } else if (responseData && responseData.body) {
+                // Sometimes API Gateway wraps response in body field
+                try {
+                    const bodyData = typeof responseData.body === 'string' 
+                        ? JSON.parse(responseData.body) 
+                        : responseData.body;
+                        
+                    if (bodyData && Array.isArray(bodyData.Items)) {
+                        res.json({ success: true, Items: bodyData.Items });
+                    } else {
+                        res.json({ success: true, Items: [] });
+                    }
+                } catch (parseErr) {
+                    console.error('Error parsing response body:', parseErr);
+                    res.json({ success: true, Items: [] });
+                }
+            } else {
+                res.json({ success: true, Items: [] });
+                console.warn('Unexpected response format:', responseData);
+            }
+        } catch (apiError) {
+            console.error('Error fetching from API Gateway:', apiError);
+            
+            // Fall back to local files endpoint
+            try {
+                const userUsername = req.session.userInfo?.username || 'anonymous';
+                
+                // Fall back to S3
+                const s3Params = {
+                    Bucket: BUCKET_NAME,
+                    Prefix: `${userUsername}/`
+                };
+                
+                const s3Result = await s3.listObjectsV2(s3Params).promise();
+                
+                // Transform S3 objects to match desired format
+                const transformedItems = s3Result.Contents ? s3Result.Contents.map(item => {
+                    // Extract fileName from the key (remove the prefix)
+                    const fileName = item.Key.replace(`${userUsername}/`, '');
+                    const sessionId = fileName.includes('/') ? fileName.split('/')[0] : 'default';
+                    
+                    return {
+                        userId: userUsername,
+                        fileName: fileName,
+                        sessionId: sessionId,
+                        s3Bucket: BUCKET_NAME,
+                        s3Key: item.Key,
+                        uploadTimestamp: item.LastModified.toISOString(),
+                        fileSize: item.Size,
+                        status: 'unprocessed'
+                    };
+                }).filter(item => item.fileSize > 0) : []; // Filter out folder objects
+                
+                res.json({
+                    success: true,
+                    Items: transformedItems,
+                    source: 's3'
+                });
+            } catch (s3Error) {
+                console.error('Error fetching from S3:', s3Error);
+                res.json({ success: true, Items: [] });
+            }
+        }
+    } catch (err) {
+        console.error('Error in /api/files endpoint:', err);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to fetch files',
+            message: err.message 
+        });
+    }
+});
+
+// Start server
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+    console.log(`Callback URL: ${COGNITO_CONFIG.redirectUri}`);
+}); 

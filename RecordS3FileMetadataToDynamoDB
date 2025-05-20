@@ -1,0 +1,79 @@
+import json
+import boto3
+import os
+import urllib.parse # For decoding S3 object keys which might have special characters
+from datetime import datetime, timezone
+
+# Initialize DynamoDB client using boto3 resource
+dynamodb = boto3.resource('dynamodb')
+# Get DynamoDB table name from an environment variable for flexibility
+TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME', 'FileMetadata') # Default to 'FileMetadata' if not set
+table = dynamodb.Table(TABLE_NAME)
+
+def lambda_handler(event, context):
+    print("Received S3 event:", json.dumps(event, indent=2))
+
+    # S3 events can potentially batch records, though for 'ObjectCreated' it's typically one.
+    # Process the first record.
+    s3_record = event['Records'][0]['s3']
+    bucket_name = s3_record['bucket']['name']
+    # Object key needs to be URL-decoded (e.g., spaces become '+', then unquote_plus handles them)
+    object_key = urllib.parse.unquote_plus(s3_record['object']['key'], encoding='utf-8')
+    file_size = s3_record['object'].get('size', 0) # File size in bytes, defaults to 0 if not present
+
+    print(f"Processing file from Bucket: '{bucket_name}', Key: '{object_key}', Size: {file_size} bytes")
+
+    try:
+        # --- Parse USERNAME, SESSION_ID, USER_FOLDER, and FILENAME from the object_key ---
+        # Your S3 key structure: USERNAME/SESSION_ID/USER_FOLDER/FILENAME.EXT
+        # Example: "cognito_user_123/session-20250510-143000/my_project/mydocument.pdf"
+        key_parts = object_key.split('/')
+
+        if len(key_parts) < 4:
+            error_message = f"Error: Object key '{object_key}' does not match expected structure 'USERNAME/SESSION_ID/USER_FOLDER/FILENAME.EXT'. It has {len(key_parts)} parts: {key_parts}"
+            print(error_message)
+            raise ValueError(error_message) # Raise an error to stop processing
+
+        user_id_from_path = key_parts[0]      # This is your Cognito USERNAME
+        session_id_from_path = key_parts[1]   # This is your frontend generated SESSION_ID
+        user_folder_from_path = key_parts[2]  # This is the user-named folder
+        file_name_from_path = key_parts[3]    # This is your FILENAME.EXT
+
+        # Construct the DynamoDB Sort Key
+        dynamodb_sort_key = f"{session_id_from_path}#{user_folder_from_path}#{file_name_from_path}"
+
+        # Get current timestamp in ISO 8601 format (UTC)
+        upload_timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Prepare the item to store in DynamoDB
+        item_to_store = {
+            'userId': user_id_from_path,             # Partition Key
+            'sessionId#fileName': dynamodb_sort_key, # Sort Key
+            'sessionId': session_id_from_path,       # Store raw session ID as well
+            'userFolder': user_folder_from_path,     # Store the user-named folder
+            'fileName': file_name_from_path,         # Store raw filename as well
+            's3Bucket': bucket_name,
+            's3Key': object_key,                     # Full S3 path
+            'uploadTimestamp': upload_timestamp,
+            'fileSize': int(file_size),              # Ensure it's an integer
+            'status': "unprocessed"                  # Set initial processing status
+        }
+        print("Item to be stored in DynamoDB:", json.dumps(item_to_store, indent=2))
+
+        # Put the item into the DynamoDB table
+        table.put_item(Item=item_to_store)
+        print(f"Successfully stored metadata for S3 object '{object_key}' in DynamoDB table '{TABLE_NAME}'.")
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps(f'Successfully processed S3 object: {object_key}')
+        }
+
+    except Exception as e:
+        # Log detailed error information
+        print(f"Error processing S3 event for object key '{object_key if 'object_key' in locals() else 'unknown'}'. Error: {str(e)}")
+        # It's good practice to print the full event that caused the error for easier debugging
+        print("Full event causing error:", json.dumps(event, indent=2))
+        # Re-raise the exception. This marks the Lambda invocation as failed,
+        # allowing S3 to retry based on its event notification configuration, or send to a DLQ if configured.
+        raise 
