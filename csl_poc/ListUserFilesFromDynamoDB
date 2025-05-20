@@ -1,0 +1,98 @@
+import json
+import boto3
+import os
+from boto3.dynamodb.conditions import Key
+from decimal import Decimal
+
+# Custom JSON encoder to handle Decimal types from DynamoDB
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, Decimal):
+            # If it's an integer, convert to int, otherwise to float
+            if o % 1 == 0:
+                return int(o)
+            else:
+                return float(o)
+        return super(DecimalEncoder, self).default(o)
+
+dynamodb = boto3.resource('dynamodb')
+TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME', 'FileMetadata')
+table = dynamodb.Table(TABLE_NAME)
+
+def lambda_handler(event, context):
+    print("Received API Gateway event:", json.dumps(event, indent=2))
+
+    try:
+        # Try to extract user information from multiple sources
+        claims = event.get('requestContext', {}).get('authorizer', {}).get('jwt', {}).get('claims', {})
+        print("JWT claims:", claims)
+        
+        # Try different user identifiers in order of preference
+        user_identifiers = [
+            ('cognito:username', claims.get('cognito:username')),
+            ('email', claims.get('email')),
+            ('sub', claims.get('sub')),
+            ('username', claims.get('username'))
+        ]
+        
+        # Try debugging - scan a few items to see what's in the table
+        try:
+            print("Performing test scan on DynamoDB table...")
+            scan_result = table.scan(Limit=5)
+            print(f"Sample items in table: {json.dumps(scan_result.get('Items', []), cls=DecimalEncoder)}")
+            
+            # Check if we can identify what the key field is
+            if scan_result.get('Items'):
+                print(f"Sample item keys: {list(scan_result['Items'][0].keys())}")
+        except Exception as scan_error:
+            print(f"Error scanning table: {str(scan_error)}")
+        
+        # Try each identifier to find a match
+        for id_type, id_value in user_identifiers:
+            if id_value:
+                print(f"Trying to query with {id_type} = {id_value}")
+                
+                response = table.query(
+                    KeyConditionExpression=Key('userId').eq(id_value)
+                )
+                
+                items = response.get('Items', [])
+                print(f"Found {len(items)} items for {id_type} = {id_value}")
+                
+                if items:
+                    # We found items, return them
+                    return {
+                        'statusCode': 200,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*', 
+                            'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                            'Access-Control-Allow-Methods': 'GET,OPTIONS'
+                        },
+                        'body': json.dumps(items, cls=DecimalEncoder)
+                    }
+        
+        # If we reach here, we tried all identifiers but found no items
+        print("No items found for any user identifier")
+        
+        # Return an empty list rather than an error
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*', 
+                'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                'Access-Control-Allow-Methods': 'GET,OPTIONS'
+            },
+            'body': json.dumps([], cls=DecimalEncoder)
+        }
+
+    except Exception as e:
+        print(f"Error listing files for user: {str(e)}")
+        print("Full event causing error:", json.dumps(event, indent=2))
+        error_message = str(e)
+        return {
+            'statusCode': 500,
+            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+            'body': json.dumps({'error': f'Internal server error: {error_message}'})
+        } 

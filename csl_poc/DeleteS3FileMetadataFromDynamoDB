@@ -1,0 +1,43 @@
+import json
+import boto3
+import os
+import urllib.parse
+
+dynamodb = boto3.resource('dynamodb')
+TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME', 'FileMetadata')
+table = dynamodb.Table(TABLE_NAME)
+
+def lambda_handler(event, context):
+    print("Received S3 delete event:", json.dumps(event, indent=2))
+    s3_record = event['Records'][0]['s3']
+    bucket_name = s3_record['bucket']['name']
+    object_key = urllib.parse.unquote_plus(s3_record['object']['key'], encoding='utf-8')
+
+    print(f"Processing DELETE for Bucket: '{bucket_name}', Key: '{object_key}'")
+    try:
+        key_parts = object_key.split('/')
+        if len(key_parts) < 4:
+            raise ValueError(f"Error: Object key '{object_key}' incorrect structure for delete. Expected: USERNAME/SESSION_ID/USER_FOLDER/FILENAME.EXT")
+
+        user_id_from_path = key_parts[0]
+        session_id_from_path = key_parts[1]
+        user_folder_from_path = key_parts[2]
+        file_name_from_path = key_parts[3]
+
+        pk_to_delete = user_id_from_path
+        sk_to_delete = f"{session_id_from_path}#{user_folder_from_path}#{file_name_from_path}"
+
+        print(f"Attempting to delete from DynamoDB: PK='{pk_to_delete}', SK='{sk_to_delete}'")
+        response = table.delete_item(
+            Key={
+                'userId': pk_to_delete,
+                'sessionId#fileName': sk_to_delete
+            }
+        )
+        print(f"DynamoDB delete_item response: {response}")
+        print(f"Successfully processed S3 delete event for '{object_key}'.")
+        return {'statusCode': 200, 'body': json.dumps(f'Processed DELETE: {object_key}')}
+    except Exception as e:
+        print(f"Error processing DELETE for '{object_key}': {str(e)}")
+        print("Full event causing error:", json.dumps(event, indent=2))
+        raise 

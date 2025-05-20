@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocuChat AI - Intelligent Document RAG Platform</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --primary-dark: #4338ca;
+            --secondary: #0ea5e9;
+            --dark: #1e293b;
+            --light: #f8fafc;
+            --gray: #64748b;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            color: var(--dark);
+            line-height: 1.6;
+            background-color: #f1f5f9;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        
+        header {
+            background-color: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            padding: 1rem 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+        }
+        
+        .nav-links a {
+            text-decoration: none;
+            color: var(--dark);
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+        
+        .nav-links a:hover {
+            color: var(--primary);
+        }
+        
+        .auth-buttons {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        
+        .btn {
+            display: inline-block;
+            padding: 0.5rem 1.25rem;
+            border-radius: 0.375rem;
+            font-weight: 500;
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            font-size: 0.875rem;
+        }
+        
+        .btn-primary {
+            background-color: var(--primary);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background-color: var(--primary-dark);
+        }
+        
+        .btn-outline {
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            background-color: transparent;
+        }
+        
+        .btn-outline:hover {
+            background-color: var(--primary);
+            color: white;
+        }
+        
+        .btn-danger {
+            background-color: var(--danger);
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background-color: #dc2626;
+        }
+        
+        .hero {
+            padding: 4rem 0;
+            background: linear-gradient(to right, #4f46e5, #0ea5e9);
+            color: white;
+            text-align: center;
+        }
+        
+        .hero h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            font-weight: 800;
+        }
+        
+        .hero p {
+            font-size: 1.25rem;
+            max-width: 800px;
+            margin: 0 auto 2rem;
+            opacity: 0.9;
+        }
+        
+        .features {
+            padding: 5rem 0;
+            background-color: white;
+        }
+        
+        .section-title {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+        
+        .section-title h2 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            color: var(--dark);
+        }
+        
+        .section-title p {
+            font-size: 1.125rem;
+            color: var(--gray);
+            max-width: 700px;
+            margin: 0 auto;
+        }
+        
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+        
+        .feature-card {
+            background-color: #f8fafc;
+            border-radius: 0.5rem;
+            padding: 2rem;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        
+        .feature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+        }
+        
+        .feature-icon {
+            width: 50px;
+            height: 50px;
+            background-color: var(--primary);
+            color: white;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .feature-card h3 {
+            font-size: 1.25rem;
+            margin-bottom: 0.75rem;
+            font-weight: 600;
+        }
+        
+        .feature-card p {
+            color: var(--gray);
+            font-size: 0.9rem;
+        }
+        
+        .user-dashboard {
+            background-color: white;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            padding: 2rem;
+            margin: 2rem 0;
+        }
+        
+        .user-welcome {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .user-avatar {
+            width: 60px;
+            height: 60px;
+            background-color: var(--primary);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+        
+        .user-details {
+            flex: 1;
+        }
+        
+        .user-details h2 {
+            font-size: 1.5rem;
+            margin-bottom: 0.25rem;
+        }
+        
+        .user-details p {
+            color: var(--gray);
+        }
+        
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+        }
+        
+        .stat-card {
+            background-color: #f8fafc;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            text-align: center;
+        }
+        
+        .stat-card h3 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            color: var(--primary);
+        }
+        
+        .stat-card p {
+            color: var(--gray);
+            font-size: 0.9rem;
+        }
+        
+        .user-actions {
+            display: flex;
+            gap: 1rem;
+            margin-top: 1.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .user-info-container {
+            background-color: #f8fafc;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-top: 1.5rem;
+            overflow: auto;
+            max-height: 300px;
+        }
+        
+        .user-info-container h3 {
+            margin-bottom: 1rem;
+            font-size: 1.25rem;
+        }
+        
+        pre {
+            background-color: #f1f5f9;
+            padding: 1rem;
+            border-radius: 0.375rem;
+            font-family: monospace;
+            overflow: auto;
+        }
+        
+        footer {
+            background-color: var(--dark);
+            color: white;
+            padding: 3rem 0;
+            margin-top: 4rem;
+        }
+        
+        .footer-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+        }
+        
+        .footer-column h3 {
+            font-size: 1.25rem;
+            margin-bottom: 1.5rem;
+            font-weight: 600;
+        }
+        
+        .footer-links {
+            list-style: none;
+        }
+        
+        .footer-links li {
+            margin-bottom: 0.75rem;
+        }
+        
+        .footer-links a {
+            color: #cbd5e1;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        
+        .footer-links a:hover {
+            color: white;
+        }
+        
+        .footer-bottom {
+            margin-top: 3rem;
+            text-align: center;
+            padding-top: 1.5rem;
+            border-top: 1px solid #334155;
+            color: #94a3b8;
+            font-size: 0.875rem;
+        }
+        
+        @media (max-width: 768px) {
+            .nav-links {
+                display: none;
+            }
+            
+            .hero h1 {
+                font-size: 2rem;
+            }
+            
+            .hero p {
+                font-size: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="navbar">
+                <div class="logo">
+                    <i class="fas fa-robot"></i>
+                    <span>DocuChat AI</span>
+                </div>
+                <div class="nav-links">
+                    <a href="#">Home</a>
+                    <a href="#">Features</a>
+                    <a href="#">Pricing</a>
+                    <a href="#">About</a>
+                    <a href="#">Contact</a>
+                </div>
+                <div class="auth-buttons">
+                    <% if (isAuthenticated) { %>
+                        <a href="/logout" class="btn btn-danger">Logout</a>
+                    <% } else { %>
+                        <a href="/login" class="btn btn-primary">Login</a>
+                    <% } %>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <% if (!isAuthenticated) { %>
+    <section class="hero">
+        <div class="container">
+            <h1>Chat with Your Documents</h1>
+            <p>Transform how you interact with your data using our advanced RAG (Retrieval Augmented Generation) platform powered by cutting-edge AI models.</p>
+            <a href="/login" class="btn btn-outline">Get Started <i class="fas fa-arrow-right"></i></a>
+        </div>
+    </section>
+
+    <section class="features">
+        <div class="container">
+            <div class="section-title">
+                <h2>Powerful Features</h2>
+                <p>Discover how DocuChat AI revolutionizes document interaction with our comprehensive suite of tools</p>
+            </div>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-robot"></i>
+                    </div>
+                    <h3>Multi-LLM Support</h3>
+                    <p>Choose from a wide range of language models including GPT-4, Claude, and Llama to interact with your documents based on your specific needs.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-cloud-upload-alt"></i>
+                    </div>
+                    <h3>Secure Storage</h3>
+                    <p>All your documents are securely stored in AWS S3 with user-specific folders and strong authentication controls.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-search"></i>
+                    </div>
+                    <h3>Smart Retrieval</h3>
+                    <p>Advanced retrieval algorithms ensure the most relevant parts of your documents are used to generate accurate responses.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-chart-line"></i>
+                    </div>
+                    <h3>Interactive Dashboard</h3>
+                    <p>Monitor usage, track conversations, and manage your document repository with our intuitive dashboard.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-file-alt"></i>
+                    </div>
+                    <h3>Multiple File Formats</h3>
+                    <p>Support for PDF, DOCX, TXT, CSV, and more - upload virtually any text-based document to chat with it instantly.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-lock"></i>
+                    </div>
+                    <h3>AWS Cognito Security</h3>
+                    <p>Industry-leading authentication powered by AWS Cognito ensures your data remains secure and private.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+    <% } else { %>
+    <section class="container" style="padding-top: 2rem;">
+        <div class="user-dashboard">
+            <div class="user-welcome">
+                <div class="user-avatar">
+                    <%= userInfo.email.charAt(0).toUpperCase() %>
+                </div>
+                <div class="user-details">
+                    <h2>Welcome, <%= userInfo.username || userInfo.email.split('@')[0] %></h2>
+                    <p>Let's chat with your documents today!</p>
+                </div>
+            </div>
+            
+            <div class="stat-grid">
+                <div class="stat-card">
+                    <h3>0</h3>
+                    <p>Uploaded Documents</p>
+                </div>
+                <div class="stat-card">
+                    <h3>0</h3>
+                    <p>Conversations</p>
+                </div>
+                <div class="stat-card">
+                    <h3>0</h3>
+                    <p>Queries Answered</p>
+                </div>
+            </div>
+            
+            <div class="user-actions">
+                <a href="http://localhost:3000/dashboard" class="btn btn-primary">
+                    <i class="fas fa-tachometer-alt"></i> Go to Dashboard
+                </a>
+                <a href="http://localhost:3000/upload" class="btn btn-outline">
+                    <i class="fas fa-upload"></i> Upload Documents
+                </a>
+                <a href="http://localhost:3000/chat" class="btn btn-outline">
+                    <i class="fas fa-comments"></i> Start Chatting
+                </a>
+            </div>
+            
+            <div class="user-info-container">
+                <h3>Your Profile Information</h3>
+                <pre><%= JSON.stringify(userInfo, null, 4) %></pre>
+            </div>
+        </div>
+    </section>
+    <% } %>
+
+    <footer>
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-column">
+                    <h3>DocuChat AI</h3>
+                    <ul class="footer-links">
+                        <li><a href="#">About Us</a></li>
+                        <li><a href="#">Blog</a></li>
+                        <li><a href="#">Careers</a></li>
+                        <li><a href="#">Press</a></li>
+                    </ul>
+                </div>
+                <div class="footer-column">
+                    <h3>Features</h3>
+                    <ul class="footer-links">
+                        <li><a href="#">Document Chat</a></li>
+                        <li><a href="#">Multi-LLM Support</a></li>
+                        <li><a href="#">Secure Storage</a></li>
+                        <li><a href="#">Analytics</a></li>
+                    </ul>
+                </div>
+                <div class="footer-column">
+                    <h3>Resources</h3>
+                    <ul class="footer-links">
+                        <li><a href="#">Documentation</a></li>
+                        <li><a href="#">API</a></li>
+                        <li><a href="#">Community</a></li>
+                        <li><a href="#">Support</a></li>
+                    </ul>
+                </div>
+                <div class="footer-column">
+                    <h3>Legal</h3>
+                    <ul class="footer-links">
+                        <li><a href="#">Privacy Policy</a></li>
+                        <li><a href="#">Terms of Service</a></li>
+                        <li><a href="#">Cookie Policy</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2025 DocuChat AI. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html> 
